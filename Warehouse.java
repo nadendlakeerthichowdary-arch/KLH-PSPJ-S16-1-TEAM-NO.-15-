@@ -1,0 +1,577 @@
+// ==============================================================
+//  WAREHOUSE INVENTORY & REORDER SYSTEM  -  single file version
+// ==============================================================
+
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.*;
+import java.util.stream.Collectors;
+
+
+// ==============================================================
+//  PART 1 - the Product class          [MODULE 4 + MODULE 1]
+// ==============================================================
+class Product {
+
+    // MODULE 1: constants. final means the value never changes.
+    static final int NORMAL  = 0;
+    static final int FRAGILE = 1;
+    static final int COLD    = 2;
+
+    // MODULE 4: static member - one copy shared by all products
+    static int productCount = 0;
+
+    // MODULE 4: private fields = encapsulation (information hiding)
+    private String code;
+    private String name;
+    private String category;
+    private int quantity;
+    private double price;
+    private int reorderPoint;
+    private int flag;
+
+    // MODULE 4: parameterized constructor
+    Product(String code, String name, String category,
+            int quantity, double price, int reorderPoint, int flag) {
+        this.code = code;              // "this" = the object being built
+        this.name = name;
+        this.category = category;
+        this.quantity = quantity;
+        this.price = price;
+        this.reorderPoint = reorderPoint;
+        this.flag = flag;
+        productCount++;                // MODULE 1: unary increment
+    }
+
+    // MODULE 4: constructor overloading - fewer arguments, defaults filled in
+    Product(String code, String name, int quantity, double price) {
+        this(code, name, "GENERAL", quantity, price, 10, NORMAL);
+    }
+
+    // MODULE 4: getters and setters - the only way in from outside
+    String getCode()      { return code; }
+    String getName()      { return name; }
+    String getCategory()  { return category; }
+    int getQuantity()     { return quantity; }
+    double getPrice()     { return price; }
+    int getReorderPoint() { return reorderPoint; }
+
+    void increase(int qty) { quantity += qty; }   // MODULE 1: compound assignment
+    void decrease(int qty) { quantity -= qty; }
+
+    double stockValue() { return quantity * price; }
+
+    // MODULE 1: ternary operator - a one line if-else
+    String status() { return quantity <= reorderPoint ? "LOW" : "OK"; }
+
+    // MODULE 1: bitwise AND to test whether a flag bit is switched on
+    boolean isFragile() { return (flag & FRAGILE) != 0; }
+    boolean isCold()    { return (flag & COLD)    != 0; }
+
+    // MODULE 4: toString decides how the object prints
+    public String toString() { return code + "(" + name + ":" + quantity + ")"; }
+
+    // MODULE 5: build one CSV line using String.join
+    String toCsv() {
+        return String.join(",", code, name, category,
+                "" + quantity, "" + price, "" + reorderPoint, "" + flag);
+    }
+}
+
+
+// ==============================================================
+//  PART 2 - transactions and inheritance        [MODULE 4]
+//  A Txn is the parent. Inward, Purchase and Return are children.
+//  "Inward IS-A Txn" - that is the is-a relationship.
+// ==============================================================
+abstract class Txn {
+
+    static int counter = 1000;
+
+    protected String id;
+    protected String code;
+    protected int qty;
+
+    Txn(String code, int qty) {
+        this.id = "T" + (++counter);
+        this.code = code;
+        this.qty = qty;
+    }
+
+    // Abstract methods: every child MUST write its own version
+    abstract String type();
+    abstract int effect();           // +qty or -qty
+
+    public String toString() {
+        return String.format("%-6s %-9s %-5s %4d", id, type(), code, qty);
+    }
+}
+
+class Inward extends Txn {                      // goods brought in
+    Inward(String code, int qty) { super(code, qty); }
+    String type()  { return "INWARD"; }         // MODULE 4: overriding
+    int effect()   { return +qty; }             // stock goes UP
+}
+
+class Purchase extends Txn {                    // goods sold
+    Purchase(String code, int qty) { super(code, qty); }
+    String type()  { return "PURCHASE"; }
+    int effect()   { return -qty; }             // stock goes DOWN
+}
+
+class Return extends Txn {                      // goods returned
+    private String reason;
+    Return(String code, int qty, String reason) {
+        super(code, qty);
+        this.reason = reason;
+    }
+    String type()  { return "RETURN"; }
+    int effect()   { return +qty; }             // stock goes UP
+    public String toString() { return super.toString() + "  [" + reason + "]"; }
+}
+
+
+// ==============================================================
+//  PART 3 - our own exception                   [MODULE 4]
+//  extends Exception makes it a CHECKED exception, so the
+//  compiler forces the caller to catch it.
+// ==============================================================
+class NoStockException extends Exception {
+    int asked, available;
+    NoStockException(String name, int asked, int available) {
+        super("Not enough " + name + ": asked " + asked + ", have " + available);
+        this.asked = asked;
+        this.available = available;
+    }
+}
+
+
+// ==============================================================
+//  PART 4 - the main class: storage, logic and menu
+// ==============================================================
+public class Warehouse {
+
+    // MODULE 6: generic collections
+    static Map<String, Product> products = new HashMap<>();   // look up by code
+    static List<Txn> ledger = new ArrayList<>();              // ordered history
+    static Set<String> suppliers = new HashSet<>();           // no duplicates
+
+    static Scanner sc = new Scanner(System.in);               // MODULE 1: input
+
+    // ----------------------------------------------------------
+    public static void main(String[] args) {
+        loadStartingStock();
+
+        System.out.println("=".repeat(46));
+        System.out.println("   WAREHOUSE INVENTORY & REORDER SYSTEM");
+        System.out.println("=".repeat(46));
+
+        menu();     // MODULE 2: the menu loop
+    }
+
+    static void loadStartingStock() {
+        addProduct(new Product("P001", "Pen",        "STATIONERY", 120,  10.50, 30, Product.NORMAL));
+        addProduct(new Product("P002", "Notebook",   "STATIONERY",  60,  45.00, 20, Product.NORMAL));
+        addProduct(new Product("P003", "Glass Vial", "LAB",         40,  18.75, 25, Product.FRAGILE));
+        addProduct(new Product("P004", "Vaccine Box","PHARMA",      18, 950.00, 25, Product.COLD));
+        addProduct(new Product("P005", "Carton", 200, 12.00));   // overloaded constructor
+    }
+
+    static void addProduct(Product p) { products.put(p.getCode(), p); }
+
+
+    // ==========================================================
+    //  MENU                              [MODULE 1 + MODULE 2]
+    // ==========================================================
+    static void menu() {
+        boolean running = true;
+
+        while (running) {                        // MODULE 2: while loop
+            System.out.println("\n--------- MENU ---------");
+            System.out.println(" 1. Stock report");
+            System.out.println(" 2. Bring in goods");
+            System.out.println(" 3. Purchase goods");
+            System.out.println(" 4. Return goods");
+            System.out.println(" 5. Array statistics");
+            System.out.println(" 6. Stream reports");
+            System.out.println(" 7. Transaction ledger");
+            System.out.println(" 8. Save to file");
+            System.out.println(" 9. Run full demo");
+            System.out.println(" 0. Exit");
+            System.out.print("Choice: ");
+
+            int choice = readInt();
+
+            switch (choice) {                    // MODULE 2: switch
+                case 1: stockReport();      break;
+                case 2: doBringIn();        break;
+                case 3: doPurchase();       break;
+                case 4: doReturn();         break;
+                case 5: arrayStats();       break;
+                case 6: streamReports();    break;
+                case 7: ledgerReport();     break;
+                case 8: saveToFile();       break;
+                case 9: demo();             break;
+                case 0:
+                    running = false;
+                    System.out.println("Closing. Goodbye.");
+                    break;
+                default:                         // MODULE 2: default
+                    System.out.println("Please choose between 0 and 9.");
+            }
+        }
+        sc.close();
+    }
+
+    // MODULE 2 + 3: a small helper method with a do-while loop
+    static int readInt() {
+        int value;
+        do {
+            try {
+                value = Integer.parseInt(sc.nextLine().trim());
+            } catch (NumberFormatException e) {  // MODULE 4: unchecked exception
+                System.out.print("Not a number. Try again: ");
+                value = -999;
+            }
+        } while (value == -999);
+        return value;
+    }
+
+
+    // ==========================================================
+    //  THE THREE STOCK MOVEMENTS                   [MODULE 2 + 4]
+    // ==========================================================
+
+    // ---- goods brought in from a supplier: stock UP ----
+    static void bringIn(String code, int qty, String supplier) {
+        Product p = products.get(code);
+        if (p == null) {                         // MODULE 2: if
+            System.out.println("Unknown product: " + code);
+            return;
+        }
+        p.increase(qty);
+        suppliers.add(supplier);
+        ledger.add(new Inward(code, qty));
+        System.out.printf("IN       %-13s +%-4d stock=%d%n", p.getName(), qty, p.getQuantity());
+    }
+
+    // ---- goods purchased by a customer: stock DOWN ----
+    // "throws" warns the caller that this may fail  [MODULE 4]
+    static void purchase(String code, int qty) throws NoStockException {
+        Product p = products.get(code);
+        if (p == null) {
+            System.out.println("Unknown product: " + code);
+            return;
+        }
+        if (qty > p.getQuantity()) {
+            throw new NoStockException(p.getName(), qty, p.getQuantity());
+        }
+        p.decrease(qty);
+        ledger.add(new Purchase(code, qty));
+        System.out.printf("PURCHASE %-13s -%-4d stock=%d  %s%n",
+                p.getName(), qty, p.getQuantity(), p.status());
+
+        if (p.getQuantity() <= p.getReorderPoint()) {
+            System.out.println("   ALERT: reorder " + p.getName()
+                    + " (at " + p.getQuantity()
+                    + ", reorder point " + p.getReorderPoint() + ")");
+        }
+    }
+
+    // ---- goods returned by a customer: stock UP ----
+    static void returnGoods(String code, int qty, String reason) {
+        Product p = products.get(code);
+        if (p == null) {
+            System.out.println("Unknown product: " + code);
+            return;
+        }
+        p.increase(qty);
+        ledger.add(new Return(code, qty, reason));
+        System.out.printf("RETURN   %-13s +%-4d stock=%d  (%s)%n",
+                p.getName(), qty, p.getQuantity(), reason);
+    }
+
+    // MODULE 3: method overloading - same name, fewer parameters
+    static void returnGoods(String code, int qty) {
+        returnGoods(code, qty, "No reason given");
+    }
+
+    // ---- menu wrappers that read the input ----
+    static void doBringIn() {
+        System.out.print("Product code: ");  String c = sc.nextLine().trim();
+        System.out.print("Quantity: ");      int q = readInt();
+        System.out.print("Supplier: ");      String s = sc.nextLine().trim();
+        bringIn(c, q, s);
+    }
+
+    static void doPurchase() {
+        System.out.print("Product code: ");  String c = sc.nextLine().trim();
+        System.out.print("Quantity: ");      int q = readInt();
+        try {                                       // MODULE 4: try-catch-finally
+            purchase(c, q);
+        } catch (NoStockException e) {
+            System.out.println("   Rejected: " + e.getMessage());
+            System.out.println("   Short by " + (e.asked - e.available) + " units");
+        } finally {
+            System.out.println("   (purchase attempt finished)");
+        }
+    }
+
+    static void doReturn() {
+        System.out.print("Product code: ");  String c = sc.nextLine().trim();
+        System.out.print("Quantity: ");      int q = readInt();
+        System.out.print("Reason: ");        String r = sc.nextLine().trim();
+        if (r.isEmpty()) returnGoods(c, q);         // overloaded version
+        else             returnGoods(c, q, r);
+    }
+
+
+    // ==========================================================
+    //  ARRAYS, MATRIX AND RECURSION                  [MODULE 3]
+    // ==========================================================
+    static void arrayStats() {
+        System.out.println("\n--- Array statistics (Module 3) ---");
+
+        int[] qty = new int[products.size()];        // 1D array
+        int i = 0;
+        for (Product p : products.values()) {        // enhanced for-each
+            qty[i++] = p.getQuantity();
+        }
+
+        int total = 0, max = qty[0], lowCount = 0;
+        for (int q : qty) {                          // traversal
+            total += q;                              // summation
+            if (q > max) max = q;                    // searching for maximum
+            if (q < 25) lowCount++;                  // counting technique
+        }
+        double average = (double) total / qty.length;   // MODULE 1: typecasting
+
+        System.out.println("Items          : " + qty.length);
+        System.out.println("Total units    : " + total);
+        System.out.printf ("Average        : %.2f%n", average);
+        System.out.println("Highest stock  : " + max);
+        System.out.println("Items under 25 : " + lowCount);
+
+        // MODULE 5: library algorithms
+        int[] sorted = Arrays.copyOf(qty, qty.length);
+        Arrays.sort(sorted);
+        System.out.println("Sorted         : " + Arrays.toString(sorted));
+        System.out.println("Max at index   : " + Arrays.binarySearch(sorted, max));
+
+        // ---- 2D array: 3 racks with 4 shelves each ----
+        int[][] rack = { {12, 8, 20, 5}, {7, 15, 3, 11}, {25, 2, 9, 14} };
+        System.out.println("\n--- Rack matrix 2D array (Module 3) ---");
+        int grand = 0;
+        for (int r = 0; r < rack.length; r++) {          // MODULE 2: nested loops
+            int rowTotal = 0;
+            System.out.print("Rack " + (r + 1) + ":");
+            for (int c = 0; c < rack[r].length; c++) {
+                System.out.printf("%4d", rack[r][c]);
+                rowTotal += rack[r][c];
+            }
+            grand += rowTotal;
+            System.out.println("   row total = " + rowTotal);
+        }
+        System.out.println("Grand total = " + grand);
+
+        System.out.println("\nNet stock effect (recursive) = " + netEffect(0));
+    }
+
+    // MODULE 3: RECURSION - a method that calls itself.
+    // It adds the effect of every transaction from index onwards.
+    static int netEffect(int index) {
+        if (index >= ledger.size()) return 0;                    // BASE CASE
+        return ledger.get(index).effect() + netEffect(index + 1); // RECURSIVE CASE
+    }
+
+
+    // ==========================================================
+    //  STRINGS                                       [MODULE 5]
+    // ==========================================================
+    static void stringDemo() {
+        System.out.println("\n--- String handling (Module 5) ---");
+
+        String record = "  P006,Syringe,PHARMA,80,6.25  ";
+        String rec = record.trim();                   // remove outer spaces
+
+        System.out.println("Length      : " + rec.length());
+        System.out.println("Upper case  : " + rec.toUpperCase());
+        System.out.println("First field : " + rec.substring(0, rec.indexOf(',')));
+
+        String[] fields = rec.split(",");             // tokenising
+        System.out.println("Fields      : " + fields.length);
+        System.out.println("Re-joined   : " + String.join(" | ", fields));
+
+        // equals() compares the TEXT, == compares the memory address
+        String a = new String("P001");
+        String b = "P001";
+        System.out.println("a == b      : " + (a == b));      // false
+        System.out.println("a.equals(b) : " + a.equals(b));   // true
+
+        // StringBuilder: a changeable string
+        StringBuilder sb = new StringBuilder();
+        for (String f : fields) sb.append(f.charAt(0));
+        System.out.println("Initials    : " + sb + "   reversed: " + sb.reverse());
+    }
+
+
+    // ==========================================================
+    //  COLLECTIONS, LAMBDAS AND STREAMS               [MODULE 6]
+    // ==========================================================
+    static void streamReports() {
+        System.out.println("\n--- Stream reports (Module 6) ---");
+
+        // filter -> map -> collect
+        List<String> low = products.values().stream()
+                .filter(p -> p.getQuantity() <= p.getReorderPoint())   // lambda
+                .map(Product::getName)                                  // method reference
+                .collect(Collectors.toList());
+        System.out.println("Low stock items : " + low);
+
+        // reduce the stream to one number
+        double value = products.values().stream()
+                .mapToDouble(Product::stockValue)
+                .sum();
+        System.out.printf("Total value     : %.2f%n", value);
+
+        // groupingBy + counting
+        Map<String, Long> perCategory = products.values().stream()
+                .collect(Collectors.groupingBy(Product::getCategory,
+                         Collectors.counting()));
+        System.out.println("Items/category  : " + perCategory);
+
+        // groupingBy + summing
+        Map<String, Integer> unitsPerCategory = products.values().stream()
+                .collect(Collectors.groupingBy(Product::getCategory,
+                         Collectors.summingInt(Product::getQuantity)));
+        System.out.println("Units/category  : " + unitsPerCategory);
+
+        // sorted with a Comparator, limit, joining
+        String top = products.values().stream()
+                .sorted(Comparator.comparingDouble(Product::stockValue).reversed())
+                .limit(3)
+                .map(Product::getName)
+                .collect(Collectors.joining(", "));
+        System.out.println("Top 3 by value  : " + top);
+
+        // counting the transactions by their type
+        Map<String, Long> types = ledger.stream()
+                .collect(Collectors.groupingBy(Txn::type, Collectors.counting()));
+        System.out.println("Transactions    : " + types);
+    }
+
+
+    // ==========================================================
+    //  FILE OUTPUT                                   [MODULE 5]
+    // ==========================================================
+    static void saveToFile() {
+        Path file = Path.of("products.csv");
+
+        // try-with-resources: the writer closes itself automatically
+        try (BufferedWriter bw = Files.newBufferedWriter(file)) {
+            bw.write("code,name,category,qty,price,reorder,flag");
+            bw.newLine();
+            for (Product p : products.values()) {
+                bw.write(p.toCsv());
+                bw.newLine();
+            }
+            System.out.println("\nSaved " + products.size() + " products to products.csv");
+        } catch (IOException e) {                 // MODULE 4: checked exception
+            System.out.println("Could not write the file: " + e.getMessage());
+        }
+    }
+
+    // Read the file back, skipping any damaged line      [MODULE 5]
+    static void loadFromFile() {
+        Path file = Path.of("products.csv");
+        int good = 0, bad = 0;
+
+        try {
+            List<String> lines = Files.readAllLines(file);
+            for (int i = 1; i < lines.size(); i++) {      // skip the header
+                String[] f = lines.get(i).split(",");
+                try {
+                    Integer.parseInt(f[3]);               // check the quantity
+                    good++;
+                } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
+                    System.out.println("   Bad record skipped: " + lines.get(i));
+                    bad++;                                // MODULE 4: multi-catch
+                }
+            }
+        } catch (IOException e) {
+            System.out.println("File not found: products.csv");
+            return;
+        }
+        System.out.println("Read back: " + good + " good, " + bad + " bad");
+    }
+
+
+    // ==========================================================
+    //  REPORTS
+    // ==========================================================
+    static void stockReport() {
+        System.out.println("\n============ STOCK REPORT ============");
+        System.out.printf("%-6s %-13s %-11s %5s %9s %7s%n",
+                "CODE", "NAME", "CATEGORY", "QTY", "PRICE", "STATUS");
+
+        // sort a copy of the products by code before printing
+        List<Product> list = new ArrayList<>(products.values());
+        list.sort(Comparator.comparing(Product::getCode));
+
+        for (Product p : list) {                       // MODULE 3: for-each
+            System.out.printf("%-6s %-13s %-11s %5d %9.2f %7s%n",
+                    p.getCode(), p.getName(), p.getCategory(),
+                    p.getQuantity(), p.getPrice(), p.status());
+        }
+        System.out.println("Products created (static count): " + Product.productCount);
+        System.out.println("Suppliers: " + suppliers);
+    }
+
+    static void ledgerReport() {
+        System.out.println("\n========== TRANSACTION LEDGER ==========");
+        if (ledger.isEmpty()) {
+            System.out.println("(no transactions yet)");
+            return;
+        }
+        // One loop prints three different kinds of object - polymorphism
+        for (Txn t : ledger) System.out.println(t);
+        System.out.println("Net stock effect = " + netEffect(0));
+    }
+
+
+    // ==========================================================
+    //  DEMO - runs everything automatically, no typing needed
+    // ==========================================================
+    static void demo() {
+        stockReport();
+
+        System.out.println("\n--- Stock movements ---");
+        bringIn("P002", 40, "Sri Traders");
+        bringIn("P003", 25, "LabGlass Co");
+
+        try {
+            purchase("P001", 100);     // succeeds and triggers the reorder alert
+            purchase("P004", 25);      // fails: only 18 in stock
+        } catch (NoStockException e) {
+            System.out.println("   Rejected: " + e.getMessage());
+            System.out.println("   Short by " + (e.asked - e.available) + " units");
+        } finally {
+            System.out.println("   (purchase block finished)");
+        }
+
+        returnGoods("P001", 15, "Damaged packing");
+        returnGoods("P002", 5);        // overloaded version
+
+        arrayStats();
+        stringDemo();
+        streamReports();
+        saveToFile();
+        loadFromFile();
+        ledgerReport();
+        stockReport();
+
+        System.out.println("\nDemo finished.");
+    }
+}
